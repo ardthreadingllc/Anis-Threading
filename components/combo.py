@@ -3,70 +3,181 @@ import sqlite3
 # Path to the SQLite database file
 DB_PATH = 'database/business.db'
 
-def add_combo(customer_id, combo_name, total_uses):
-    """
-    Adds a new combo to the database for a specific customer.
-    
-    Args:
-        customer_id (int): The ID of the customer purchasing the combo.
-        combo_name (str): The name of the combo (e.g., "Eyebrow Threading Combo").
-        total_uses (int): Total number of times the combo can be used.
-    
-    Returns:
-        bool: True if the combo was added successfully, False otherwise.
-    """
-    conn = sqlite3.connect(DB_PATH)
+# ============================
+# Helper Function
+# ============================
+
+def get_db_connection():
+    """Provides a single database connection with timeout."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row  # Makes query results more readable
+    return conn
+
+# ============================
+# Combo Types Management
+# ============================
+
+def add_combo_type(name, services, total_uses):
+    """Adds a new combo type and associates it with selected services."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        # Check if the combo already exists
+        cursor.execute("SELECT id FROM combo_types WHERE name = ?", (name,))
+        existing_combo = cursor.fetchone()
+        if existing_combo:
+            print(f"Error: Combo type '{name}' already exists.")
+            return False
+
+        # Insert the combo type
         cursor.execute(
-            "INSERT INTO combos (customer_id, combo_name, total_uses, remaining_uses) VALUES (?, ?, ?, ?)",
-            (customer_id, combo_name, total_uses, total_uses)
+            "INSERT INTO combo_types (name, total_uses) VALUES (?, ?)",
+            (name, total_uses)
+        )
+        combo_type_id = cursor.lastrowid
+
+        # Insert the services linked to the combo
+        for service_id in services:
+            cursor.execute(
+                "INSERT INTO combo_services (combo_type_id, service_id) VALUES (?, ?)",
+                (combo_type_id, service_id)
+            )
+
+        conn.commit()
+        print(f"Combo type '{name}' added successfully!")
+        return True
+    except Exception as e:
+        print(f"Error adding combo type: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_combo_types():
+    """Retrieves all available combo types."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM combo_types")
+        combo_types = cursor.fetchall()
+
+        return [
+            {"id": combo["id"], "name": combo["name"], "total_uses": combo["total_uses"]}
+            for combo in combo_types
+        ]
+    except Exception as e:
+        print(f"Error retrieving combo types: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_services_for_combo(combo_type_id=None):
+    """Retrieves all services or services linked to a specific combo type."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if combo_type_id:
+            cursor.execute(
+                """SELECT s.id, s.name FROM services s
+                   JOIN combo_services cs ON s.id = cs.service_id
+                   WHERE cs.combo_type_id = ?""",
+                (combo_type_id,)
+            )
+        else:
+            cursor.execute("SELECT id, name FROM services")
+        
+        services = [{"id": row["id"], "name": row["name"]} for row in cursor.fetchall()]
+        return services
+    except Exception as e:
+        print(f"Error retrieving services for combo: {e}")
+        return []
+    finally:
+        conn.close()
+        
+def delete_combo_type(combo_type_id):
+    """Deletes a combo type from the system, including its service mappings."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Delete services mapped to this combo
+        cursor.execute("DELETE FROM combo_services WHERE combo_type_id = ?", (combo_type_id,))
+
+        # Delete the combo type
+        cursor.execute("DELETE FROM combo_types WHERE id = ?", (combo_type_id,))
+        conn.commit()
+        print(f"Combo type ID {combo_type_id} deleted successfully!")
+        return True
+    except Exception as e:
+        print(f"Error deleting combo type: {e}")
+        return False
+    finally:
+        conn.close()
+
+# ============================
+# Customer Combo Management
+# ============================
+
+def add_combo(customer_id, combo_type_id, conn=None):
+    """Assigns a combo to a customer using a shared connection if provided."""
+    should_close_connection = False
+    if conn is None:
+        conn = get_db_connection()
+        should_close_connection = True
+
+    cursor = conn.cursor()
+    try:
+        # Retrieve total uses from the combo_types table
+        cursor.execute("SELECT total_uses FROM combo_types WHERE id = ?", (combo_type_id,))
+        result = cursor.fetchone()
+        if not result:
+            print(f"Error: Combo type ID {combo_type_id} does not exist.")
+            return False
+        total_uses = result["total_uses"]
+
+        # Add combo to the combos table
+        cursor.execute(
+            "INSERT INTO combos (customer_id, combo_type_id, remaining_uses) VALUES (?, ?, ?)",
+            (customer_id, combo_type_id, total_uses)
         )
         conn.commit()
-        print(f"Combo '{combo_name}' added successfully for customer ID {customer_id}!")
+        print(f"Combo for customer ID {customer_id} added successfully!")
         return True
     except Exception as e:
         print(f"Error adding combo: {e}")
         return False
     finally:
-        conn.close()
+        if should_close_connection:
+            conn.close()
 
 def get_customer_combos(customer_id):
-    """
-    Retrieves all active combos for a specific customer (remaining uses > 0).
-    
-    Args:
-        customer_id (int): The ID of the customer.
-    
-    Returns:
-        list of tuples: List of active combos (id, customer_id, combo_name, total_uses, remaining_uses).
-    """
-    conn = sqlite3.connect(DB_PATH)
+    """Retrieves all active combos for a specific customer (remaining uses > 0)."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "SELECT * FROM combos WHERE customer_id = ? AND remaining_uses > 0",
-            (customer_id,)
-        )
+        cursor.execute("""
+            SELECT c.id, ct.name, c.remaining_uses, ct.total_uses
+            FROM combos c
+            JOIN combo_types ct ON c.combo_type_id = ct.id
+            WHERE c.customer_id = ? AND c.remaining_uses > 0
+        """, (customer_id,))
+        
         combos = cursor.fetchall()
-        return combos
+        return [
+            {"id": combo["id"], "name": combo["name"], "remaining_uses": combo["remaining_uses"], "total_uses": combo["total_uses"]}
+            for combo in combos
+        ]
     except Exception as e:
-        print(f"Error retrieving combos: {e}")
+        print(f"Error retrieving customer combos: {e}")
         return []
     finally:
         conn.close()
 
-def update_combo_usage(combo_id):
-    """
-    Decreases the remaining uses of a combo by 1.
-    
-    Args:
-        combo_id (int): The ID of the combo to update.
-    
-    Returns:
-        bool: True if the update was successful, False otherwise.
-    """
-    conn = sqlite3.connect(DB_PATH)
+def update_combo_usage(combo_id, conn=None):
+    """Decreases the remaining uses of a combo by 1."""
+    should_close_connection = False
+    if conn is None:
+        conn = get_db_connection()
+        should_close_connection = True
+
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -74,8 +185,9 @@ def update_combo_usage(combo_id):
             (combo_id,)
         )
         conn.commit()
+
         if cursor.rowcount > 0:
-            print(f"Combo ID {combo_id} usage updated successfully!")
+            print(f"Debug: Combo ID {combo_id} usage updated successfully!")
             return True
         else:
             print(f"Error: Combo ID {combo_id} has no remaining uses or does not exist.")
@@ -84,78 +196,5 @@ def update_combo_usage(combo_id):
         print(f"Error updating combo usage: {e}")
         return False
     finally:
-        conn.close()
-
-def get_combo_status(combo_id):
-    """
-    Retrieves the status of a specific combo (remaining uses and total uses).
-    
-    Args:
-        combo_id (int): The ID of the combo.
-    
-    Returns:
-        tuple: Combo details (id, customer_id, combo_name, total_uses, remaining_uses) if found, otherwise None.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT * FROM combos WHERE id = ?", (combo_id,))
-        combo = cursor.fetchone()
-        return combo
-    except Exception as e:
-        print(f"Error retrieving combo status: {e}")
-        return None
-    finally:
-        conn.close()
-
-def delete_combo(combo_id):
-    """
-    Deletes a combo from the database.
-    
-    Args:
-        combo_id (int): The ID of the combo to delete.
-    
-    Returns:
-        bool: True if the combo was deleted successfully, False otherwise.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("DELETE FROM combos WHERE id = ?", (combo_id,))
-        conn.commit()
-        if cursor.rowcount > 0:
-            print(f"Combo ID {combo_id} deleted successfully!")
-            return True
-        else:
-            print(f"Error: Combo ID {combo_id} does not exist.")
-            return False
-    except Exception as e:
-        print(f"Error deleting combo: {e}")
-        return False
-    finally:
-        conn.close()
-
-# Test the functions if this file is run directly
-if __name__ == "__main__":
-    # Test adding a combo
-    add_combo(customer_id=1, combo_name="Eyebrow Threading Combo", total_uses=5)
-    
-    # Test retrieving combos for a customer
-    combos = get_customer_combos(customer_id=1)
-    print("Active Combos for Customer 1:")
-    for combo in combos:
-        print(combo)
-    
-    # Test updating combo usage
-    if combos:
-        combo_id = combos[0][0]  # Use the first combo
-        update_combo_usage(combo_id)
-    
-    # Test retrieving combo status
-    if combos:
-        combo_status = get_combo_status(combo_id)
-        print("Combo Status:", combo_status)
-    
-    # Test deleting a combo
-    if combos:
-        delete_combo(combo_id)
+        if should_close_connection:
+            conn.close()

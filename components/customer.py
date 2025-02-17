@@ -1,62 +1,62 @@
 import sqlite3
+from components.combo import add_combo, get_customer_combos, get_db_connection
 
-# Path to the SQLite database file
-DB_PATH = 'database/business.db'
+# ============================
+# Customer Management
+# ============================
 
-def initialize_database():
-    """
-    Initializes the database by creating tables defined in the schema.sql file.
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        with open('database/schema.sql', 'r') as schema_file:
-            conn.executescript(schema_file.read())
-        print("Database initialized successfully!")
-    except Exception as e:
-        print(f"Error initializing database: {e}")
-    finally:
-        conn.close()
-
-def add_customer(name, phone):
-    """
-    Adds a new customer to the database.
-    
-    Args:
-        name (str): The name of the customer.
-        phone (str): The phone number of the customer.
-    
-    Returns:
-        bool: True if the customer was added successfully, False if the phone number already exists.
-    """
-    conn = sqlite3.connect(DB_PATH)
+def add_customer(name, phone, email, combo_type_id):
+    """Adds a new customer and assigns an initial combo to them."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO customers (name, phone) VALUES (?, ?)", (name, phone))
+        # Add customer to the database
+        cursor.execute("INSERT INTO customers (name, phone, email) VALUES (?, ?, ?)", (name, phone, email))
+        customer_id = cursor.lastrowid  # Get the new customer ID
+
+        print(f"Debug: Customer '{name}' added with ID {customer_id}")
+
+        # Assign the initial combo
+        if not add_combo(customer_id, combo_type_id, conn):
+            raise Exception("Failed to add combo for the customer.")
+
         conn.commit()
-        print(f"Customer '{name}' added successfully!")
+        print(f"Customer '{name}' added successfully with combo type ID {combo_type_id}!")
         return True
     except sqlite3.IntegrityError:
-        print(f"Error: Customer with phone number '{phone}' already exists.")
+        print(f"Error: Customer with phone number '{phone}' or email '{email}' already exists.")
+        return False
+    except Exception as e:
+        print(f"Error adding customer: {e}")
         return False
     finally:
         conn.close()
 
 def get_customer_by_phone(phone):
-    """
-    Retrieves a customer's information using their phone number.
-    
-    Args:
-        phone (str): The phone number of the customer.
-    
-    Returns:
-        tuple: The customer's details (id, name, phone) if found, otherwise None.
-    """
-    conn = sqlite3.connect(DB_PATH)
+    """Retrieves a customer's information using their phone number only."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT * FROM customers WHERE phone = ?", (phone,))
         customer = cursor.fetchone()
-        return customer
+        
+        if not customer:
+            print(f"Debug: No customer found for phone number '{phone}'")
+            return None  # No customer found
+
+        customer_id = customer["id"]
+        customer_combos = get_customer_combos(customer_id)
+
+        print(f"Debug: Retrieved Customer {customer_id}: {customer}")
+        print(f"Debug: Customer {customer_id} Combos: {customer_combos}")
+
+        return {
+            "ID": customer_id,
+            "Name": customer["name"],
+            "Phone": customer["phone"],
+            "Email": customer["email"],
+            "Combos": customer_combos  # List of active combos
+        }
     except Exception as e:
         print(f"Error retrieving customer: {e}")
         return None
@@ -64,102 +64,130 @@ def get_customer_by_phone(phone):
         conn.close()
 
 def get_all_customers():
-    """
-    Retrieves all customers from the database.
-    
-    Returns:
-        list of tuples: List of all customers (id, name, phone).
-    """
-    conn = sqlite3.connect(DB_PATH)
+    """Retrieves all customers and their assigned combos."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT * FROM customers")
         customers = cursor.fetchall()
-        return customers
+
+        print(f"Debug: Retrieved Customers from DB: {customers}")
+
+        customer_list = []
+        for customer in customers:
+            customer_id = customer["id"]
+            customer_combos = get_customer_combos(customer_id)
+
+            customer_list.append({
+                "ID": customer_id,
+                "Name": customer["name"],
+                "Phone": customer["phone"],
+                "Email": customer["email"],
+                "Combos": customer_combos
+            })
+
+        return customer_list
     except Exception as e:
         print(f"Error retrieving customers: {e}")
         return []
     finally:
         conn.close()
 
-def delete_customer_by_phone(phone):
-    """
-    Deletes a customer from the database using their phone number.
-    
-    Args:
-        phone (str): The phone number of the customer to delete.
-    
-    Returns:
-        bool: True if the customer was deleted successfully, False otherwise.
-    """
-    conn = sqlite3.connect(DB_PATH)
+def edit_customer(customer_id, new_name, new_email, new_remaining_uses):
+    """Edits a customer's name and updates their remaining combo uses, but keeps phone number fixed."""
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("DELETE FROM customers WHERE phone = ?", (phone,))
-        conn.commit()
-        if cursor.rowcount > 0:
-            print(f"Customer with phone number '{phone}' deleted successfully!")
-            return True
-        else:
-            print(f"No customer found with phone number '{phone}'.")
-            return False
-    except Exception as e:
-        print(f"Error deleting customer: {e}")
-        return False
-    finally:
-        conn.close()
+        # Ensure customer exists
+        cursor.execute("SELECT name FROM customers WHERE id = ?", (customer_id,))
+        customer = cursor.fetchone()
 
-def update_customer_name(phone, new_name):
-    """
-    Updates a customer's name in the database.
-    
-    Args:
-        phone (str): The phone number of the customer to update.
-        new_name (str): The new name of the customer.
-    
-    Returns:
-        bool: True if the update was successful, False otherwise.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("UPDATE customers SET name = ? WHERE phone = ?", (new_name, phone))
-        conn.commit()
-        if cursor.rowcount > 0:
-            print(f"Customer with phone number '{phone}' updated successfully!")
-            return True
-        else:
-            print(f"No customer found with phone number '{phone}'.")
+        if not customer:
+            print(f"Error: Customer ID {customer_id} not found.")
             return False
+        
+        #check if email already exisits in the system
+        cursor.execute("SELECT id FROM customers WHERE email = ? and id != ?", (new_email, customer_id))
+        existing_customer = cursor.fetchone()
+
+        if existing_customer:
+            print(f"Error: Email '{new_email} is already in use by another customer")
+            return "email_exists"
+
+        # Perform the update (phone number is NOT updated)
+        cursor.execute(
+            """UPDATE customers 
+               SET name = ?, email = ? 
+               WHERE id = ?""",
+            (new_name, new_email, customer_id)
+        )
+
+        # Update remaining uses in combos
+        cursor.execute(
+            """UPDATE combos 
+               SET remaining_uses = ? 
+               WHERE customer_id = ?""",
+            (new_remaining_uses, customer_id)
+        )
+
+        conn.commit()
+        print(f"Customer ID {customer_id} updated successfully!")
+        return True
+
     except Exception as e:
         print(f"Error updating customer: {e}")
         return False
     finally:
         conn.close()
 
-# Test the functions if this file is run directly
-if __name__ == "__main__":
-    # Initialize the database (run this only once)
-    initialize_database()
-    
-    # Add test customers
-    add_customer("John Doe", "1234567890")
-    add_customer("Jane Smith", "9876543210")
-    
-    # Retrieve a customer by phone
-    customer = get_customer_by_phone("1234567890")
-    if customer:
-        print("Retrieved Customer:", customer)
-    else:
-        print("Customer not found.")
-    
-    # Get all customers
-    print("All Customers:")
-    for customer in get_all_customers():
-        print(customer)
-    
-    # Update a customer's name
-    update_customer_name("1234567890", "Johnathan Doe")
-    
-    # Delete a customer
-    delete_customer_by_phone("9876543210")
+def delete_customer(customer_id):
+    """Deletes a customer and all related records (appointments, combos)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Ensure customer exists
+        cursor.execute("SELECT id FROM customers WHERE id = ?", (customer_id,))
+        customer = cursor.fetchone()
+        if not customer:
+            print(f"Error: Customer ID {customer_id} does not exist.")
+            return False
+
+        # Delete all appointments associated with the customer
+        cursor.execute("DELETE FROM appointments WHERE customer_id = ?", (customer_id,))
+        print(f"Deleted all appointments for Customer ID {customer_id}.")
+
+        # Delete all combos associated with the customer
+        cursor.execute("DELETE FROM combos WHERE customer_id = ?", (customer_id,))
+        print(f"Deleted all combos for Customer ID {customer_id}.")
+
+        # Delete customer from the database
+        cursor.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+        conn.commit()
+
+        print(f"Customer ID {customer_id} deleted successfully!")
+        return True
+
+    except Exception as e:
+        print(f"Error deleting customer: {e}")
+        return False
+    finally:
+        conn.close()
+
+def remove_customer_if_combos_used_up(customer_id):
+    """Checks if a customer has any remaining combos and deletes them if all combos are used up."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM combos WHERE customer_id = ? AND remaining_uses > 0",
+            (customer_id,)
+        )
+        active_combos_count = cursor.fetchone()[0]
+        if active_combos_count == 0:
+            return delete_customer(customer_id)  # Now this checks for active combos before deletion
+        return False
+    except Exception as e:
+        print(f"Error checking customer combos: {e}")
+        return False
+    finally:
+        conn.close()
